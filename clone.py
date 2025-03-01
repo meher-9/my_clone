@@ -1,68 +1,116 @@
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
-st.set_page_config(page_title="Svecw College Chatbot", layout="centered")
+# Custom CSS for styling
+st.markdown("""
+<style>
+    .stApp {
+        background: #f8f5e6;
+        background-image: radial-gradient(#d4d0c4 1px, transparent 1px);
+        background-size: 20px 20px;
+    }
+    .chat-font {
+        font-family: 'Times New Roman', serif;
+        color: #2c5f2d;
+    }
+    .user-msg {
+        background: #ffffff !important;
+        border-radius: 15px !important;
+        border: 2px solid #2c5f2d !important;
+    }
+    .bot-msg {
+        background: #fff9e6 !important;
+        border-radius: 15px !important;
+        border: 2px solid #ffd700 !important;
+    }
+    .stChatInput {
+        background: #ffffff;
+    }
+</style>
+""", unsafe_allow_html=True)
 
+# Configure Google Gemini
+genai.configure(api_key="AIzaSyA5uAW-R1eVnPPLR1rxPlPU5wjgfUHMo_Q")  # Replace with your Gemini API key
+gemini = genai.GenerativeModel('gemini-1.5-flash')
+
+# Initialize models
+embedder = SentenceTransformer('all-MiniLM-L6-v2')  # Embedding model
+
+# Load data and create FAISS index
+@st.cache_data
+def load_data():
+    try:
+        df = pd.read_csv('my_data.csv')  # Replace with your dataset file name
+        if 'Question' not in df.columns or 'Answers' not in df.columns:
+            st.error("The CSV file must contain 'Question' and 'Answers' columns.")
+            st.stop()
+        df['context'] = df.apply(
+            lambda row: f"Question: {row['Question']}\nAnswer: {row['Answers']}", 
+            axis=1
+        )
+        embeddings = embedder.encode(df['context'].tolist())
+        index = faiss.IndexFlatL2(embeddings.shape[1])  # FAISS index for similarity search
+        index.add(np.array(embeddings).astype('float32'))
+        return df, index
+    except Exception as e:
+        st.error(f"Failed to load data. Error: {e}")
+        st.stop()
+
+# Load dataset and FAISS index
+df, faiss_index = load_data()
+
+# App Header
+st.markdown('<h1 class="chat-font">🤖 Meher Clone Chatbot</h1>', unsafe_allow_html=True)
+st.markdown('<h3 class="chat-font">Ask me anything, and I\'ll respond as Meher!</h3>', unsafe_allow_html=True)
+st.markdown("---")
+
+# Function to find the closest matching question using FAISS
+def find_closest_question(query, faiss_index, df):
+    query_embedding = embedder.encode([query])
+    _, I = faiss_index.search(query_embedding.astype('float32'), k=1)  # Top 1 match
+    if I.size > 0:
+        return df.iloc[I[0][0]]['Answers']  # Return the closest answer
+    return None
+
+# Function to generate a refined answer using Gemini
+def generate_refined_answer(query, retrieved_answer):
+    prompt = f"""You are Meher, an AI Student. Respond to the following question in a friendly and conversational tone:
+    Question: {query}
+    Retrieved Answer: {retrieved_answer}
+    - Provide a detailed and accurate response.
+    - Ensure the response is grammatically correct and engaging.
+    """
+    response = gemini.generate_content(prompt)
+    return response.text
+
+# Chat Interface
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-csv_url = "dt.csv"
-
-try:
-    df = pd.read_csv(csv_url)
-except Exception as e:
-    st.error(f"Failed to load the CSV file. Error: {e}")
-    st.stop()
-    
-df = df.fillna("")
-df['Question'] = df['Question'].str.lower()
-df['Answer'] = df['Answers'].str.lower()
-
-vectorizer = TfidfVectorizer()
-question_vectors = vectorizer.fit_transform(df['Question'])
-
-API_KEY = "AIzaSyA5uAW-R1eVnPPLR1rxPlPU5wjgfUHMo_Q" 
-
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
-
-def find_closest_question(user_query, vectorizer, question_vectors, df):
-    query_vector = vectorizer.transform([user_query.lower()])
-    similarities = cosine_similarity(query_vector, question_vectors).flatten()
-    best_match_index = similarities.argmax()
-    best_match_score = similarities[best_match_index]
-    if best_match_score > 0.3:  
-        return df.iloc[best_match_index]['Answer']
-    else:
-        return None
-
-st.title("Personal Chatbot")
-st.write("Welcome to the My Chatbot! Ask me anything about ME.")
-
 for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
+    with st.chat_message(message["role"], 
+                        avatar="🙋" if message["role"] == "user" else "🤖"):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Type your question here..."):
+if prompt := st.chat_input("Ask me anything..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        
-    closest_answer = find_closest_question(prompt, vectorizer, question_vectors, df)
-    if closest_answer:
-        st.session_state.messages.append({"role": "assistant", "content": closest_answer})
-        with st.chat_message("assistant"):
-            st.markdown(closest_answer)
-    else:
+    
+    with st.spinner("Thinking..."):
         try:
-            response = model.generate_content(
-                f"You are a helpful and knowledgeable chatbot for SVCEW College. Provide a detailed answer to the following question: {prompt}"
-            )
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
-            with st.chat_message("assistant"):
-                st.markdown(response.text)
+            # Find the closest answer
+            retrieved_answer = find_closest_question(prompt, faiss_index, df)
+            if retrieved_answer:
+                # Generate a refined answer using Gemini
+                refined_answer = generate_refined_answer(prompt, retrieved_answer)
+                response = f"**Meher**:\n{refined_answer}"
+            else:
+                response = "**Meher**:\nI'm sorry, I cannot answer that question."
         except Exception as e:
-            st.error(f"Sorry, I couldn't generate a response. Error: {e}")
+            response = f"An error occurred: {e}"
+    
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.rerun()
